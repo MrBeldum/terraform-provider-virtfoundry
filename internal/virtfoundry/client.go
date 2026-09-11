@@ -165,9 +165,14 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) (*
 
 func apiError(resp *http.Response) error {
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	text := strings.TrimSpace(string(msg))
-	if text == "" {
-		return fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	var payload struct {
+		Error string `json:"error"`
 	}
-	return fmt.Errorf("API error: HTTP %d: %s", resp.StatusCode, text)
+	if err := json.Unmarshal(msg, &payload); err == nil {
+		if e := strings.TrimSpace(payload.Error); e != "" {
+			return fmt.Errorf("API error: HTTP %d: %s", resp.StatusCode, e)
+		}
+	}
+	// Never echo raw response bodies into diagnostics (may contain secrets).
+	return fmt.Errorf("API error: HTTP %d", resp.StatusCode)
 }
