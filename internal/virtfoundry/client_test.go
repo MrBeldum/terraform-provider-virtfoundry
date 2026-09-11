@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/virtfoundry/terraform-provider-virtfoundry/internal/virtfoundry"
@@ -74,5 +75,67 @@ func TestClientAPIKeyAuth(t *testing.T) {
 	client.SetAPIKey("vfd_live_test")
 	if err := client.PingAuth(context.Background()); err != nil {
 		t.Fatalf("PingAuth: %v", err)
+	}
+}
+
+func TestClientAPIErrorUsesJSONErrorFieldOnly(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/auth/login" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid credentials","token":"super-secret","details":"do-not-leak"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := virtfoundry.NewClient(srv.URL, false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = client.Login(context.Background(), "root", "wrong")
+	if err == nil {
+		t.Fatal("expected login error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "invalid credentials") {
+		t.Fatalf("expected JSON error field in message, got %q", msg)
+	}
+	for _, leak := range []string{"super-secret", "do-not-leak", "token", "details"} {
+		if strings.Contains(msg, leak) {
+			t.Fatalf("error message leaked %q: %q", leak, msg)
+		}
+	}
+}
+
+func TestClientAPIErrorOmitsRawNonJSONBody(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream dump: password=hunter2"))
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := virtfoundry.NewClient(srv.URL, false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = client.Health(context.Background())
+	if err == nil {
+		t.Fatal("expected health error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "hunter2") || strings.Contains(msg, "password") || strings.Contains(msg, "upstream dump") {
+		t.Fatalf("raw body leaked into diagnostics: %q", msg)
+	}
+	if !strings.Contains(msg, "HTTP 502") {
+		t.Fatalf("expected status in message, got %q", msg)
 	}
 }
